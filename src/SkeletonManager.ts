@@ -59,7 +59,10 @@ export class SkeletonManager extends EventTarget {
 
   dispose(): void {
     this.stop();
-    this.model = null;
+    if (this.model) {
+      this.model.dispose();
+      this.model = null;
+    }
     this.cameraManager = null;
     this.poses = [];
   }
