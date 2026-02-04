@@ -111,4 +111,8 @@ export class SkeletonManager extends EventTarget {
   getPoseCount(): number {
     return this.poses.length;
   }
+
+  get video(): HTMLVideoElement | null {
+    return this.cameraManager ? this.cameraManager.video : null;
+  }
 }

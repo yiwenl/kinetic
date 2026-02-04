@@ -15,24 +15,25 @@ const ctx = canvas.getContext('2d');
         statusEl.textContent = "Starting camera...";
         await manager.init(); // Auto-creates camera manager
 
-        const camera = manager.cameraManager;
-        
-        // Append camera video to body
-        document.body.appendChild(camera.video);
+        // Append camera video to body (using new getter)
+        if (manager.video) {
+            document.body.appendChild(manager.video);
+        }
         // Move canvas to front
         document.body.appendChild(canvas);
 
         // Mirror video if needed
-        if (options.mirror !== false) {
-            camera.video.style.transform = 'scaleX(-1)';
+        if (options.mirror !== false && manager.video) {
+            manager.video.style.transform = 'scaleX(-1)';
         }
         
         // Resize canvas to match video
         const resize = () => {
+            if (!manager.video) return;
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
-            camera.video.style.width = '100%';
-            camera.video.style.height = '100%';
+            manager.video.style.width = '100%';
+            manager.video.style.height = '100%';
         };
         window.addEventListener('resize', resize);
         resize();
