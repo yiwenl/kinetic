@@ -1,4 +1,4 @@
-import { SkeletonManager } from '../dist/kinetic.esm.js';
+import { SkeletonManager } from '../src/index.ts';
 
 const statusEl = document.getElementById('status');
 const poseCountEl = document.getElementById('pose-count');

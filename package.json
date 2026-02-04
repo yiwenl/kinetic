@@ -19,9 +19,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "rollup -c",
     "prepare": "npm run build",
-    "test:build": "rollup -c rollup.test.config.js",
-    "dev": "rollup -c -w",
-    "start": "npx serve test"
+    "dev": "vite",
+    "start": "vite"
   },
   "repository": {
     "type": "git",
@@ -36,7 +35,8 @@
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-typescript": "^12.3.0",
     "rollup": "^4.57.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
   },
   "dependencies": {
     "@tensorflow-models/pose-detection": "^2.1.3",
