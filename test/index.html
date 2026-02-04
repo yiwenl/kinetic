@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kinetic Skeleton Tracking Test</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #222; color: white; font-family: sans-serif; }
+        canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+        video { position: absolute; top: 0; left: 0; object-fit: cover; }
+        #stats { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(0,0,0,0.5); padding: 10px; }
+    </style>
+</head>
+<body>
+    <div id="stats">
+        Status: <span id="status">Initializing...</span><br>
+        Poses: <span id="pose-count">0</span>
+    </div>
+    <script src="bundle.js"></script>
+</body>
+</html>
