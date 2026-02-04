@@ -48,8 +48,8 @@ const ctx = canvas.getContext('2d');
                 statusEl.textContent = "Tracking";
                 
                 // Scale factors
-                const videoWidth = camera.video.videoWidth;
-                const videoHeight = camera.video.videoHeight;
+                const videoWidth = manager.video.videoWidth;
+                const videoHeight = manager.video.videoHeight;
                 const scaleX = canvas.width / videoWidth;
                 const scaleY = canvas.height / videoHeight;
                 
