@@ -1,4 +1,4 @@
-import { SkeletonManager, CameraManager } from '../dist/kinetic.esm.js';
+import { SkeletonManager } from '../dist/kinetic.esm.js';
 
 const statusEl = document.getElementById('status');
 const poseCountEl = document.getElementById('pose-count');
@@ -8,16 +8,25 @@ const ctx = canvas.getContext('2d');
 
 (async () => {
     try {
+        statusEl.textContent = "Loading model...";
+        const options = { modelType: 'lite', mirror: true };
+        const manager = new SkeletonManager(options);
+
         statusEl.textContent = "Starting camera...";
-        
-        const camera = new CameraManager();
-        await camera.start();
+        await manager.init(); // Auto-creates camera manager
+
+        const camera = manager.cameraManager;
         
         // Append camera video to body
         document.body.appendChild(camera.video);
         // Move canvas to front
         document.body.appendChild(canvas);
 
+        // Mirror video if needed
+        if (options.mirror !== false) {
+            camera.video.style.transform = 'scaleX(-1)';
+        }
+        
         // Resize canvas to match video
         const resize = () => {
             canvas.width = window.innerWidth;
@@ -27,15 +36,6 @@ const ctx = canvas.getContext('2d');
         };
         window.addEventListener('resize', resize);
         resize();
-
-        statusEl.textContent = "Loading model...";
-        const options = { modelType: 'lite', mirror: true };
-        const manager = new SkeletonManager(options);
-
-        // Mirror video if needed
-        if (options.mirror !== false) {
-            camera.video.style.transform = 'scaleX(-1)';
-        }
         
         manager.addEventListener('skeleton-detected', (e) => {
             const poses = e.detail.poses;
@@ -79,7 +79,6 @@ const ctx = canvas.getContext('2d');
             }
         });
 
-        await manager.init(camera);
         statusEl.textContent = "Running";
 
     } catch (e) {

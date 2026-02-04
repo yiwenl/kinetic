@@ -24,16 +24,17 @@ npm install kinetic
 ```typescript
 import { CameraManager, SkeletonManager } from 'kinetic';
 
-// 1. Initialize Camera
-const cameraManager = new CameraManager();
-await cameraManager.start();
-document.body.appendChild(cameraManager.video);
-
-// 2. Initialize Skeleton Manager
+// 1. Initialize Skeleton Manager (Auto-initializes camera)
 const skeletonManager = new SkeletonManager({
     modelType: 'full', // 'lite', 'full', or 'heavy'
     mirror: true       // Mirror results (and flip camera) if desired. Default: true.
 });
+await skeletonManager.init();
+
+// 2. Append Video (optional, if you want to see the feed)
+if (skeletonManager.cameraManager) {
+    document.body.appendChild(skeletonManager.cameraManager.video);
+}
 
 // 3. Listen for Results
 skeletonManager.addEventListener('skeleton-detected', (e) => {
@@ -50,8 +51,7 @@ skeletonManager.addEventListener('skeleton-detected', (e) => {
     }
 });
 
-// 4. Start
-await skeletonManager.init(cameraManager);
+// 4. Start (Already initialized above)
 ```
 
 ## Build

@@ -26,8 +26,13 @@ export class SkeletonManager extends EventTarget {
     };
   }
 
-  async init(cameraManager: CameraManager) {
-    this.cameraManager = cameraManager;
+  async init(cameraManager?: CameraManager) {
+    if (cameraManager) {
+      this.cameraManager = cameraManager;
+    } else {
+      this.cameraManager = new CameraManager();
+      await this.cameraManager.start();
+    }
 
     const model = poseDetection.SupportedModels.BlazePose;
     const detectorConfig: poseDetection.BlazePoseMediaPipeModelConfig = {
