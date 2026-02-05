@@ -37,7 +37,7 @@ if (skeletonManager.video) {
 }
 
 // 3. Listen for Results
-skeletonManager.addEventListener('skeleton-detected', (e) => {
+skeletonManager.addEventListener(SkeletonManager.EVENTS.SKELETON_DETECTED, (e) => {
     // e.detail.poses is Array<poseDetection.Pose>
     const poses = e.detail.poses;
     const poseCount = skeletonManager.getPoseCount();
@@ -53,6 +53,15 @@ skeletonManager.addEventListener('skeleton-detected', (e) => {
 
 // 4. Start (Already initialized above)
 ```
+
+## Events
+
+The `SkeletonManager` exposes event names via the static `EVENTS` property:
+
+| Event Constant | Value | Description |
+| :--- | :--- | :--- |
+| `SkeletonManager.EVENTS.SKELETON_DETECTED` | `'skeleton-detected'` | Dispatched when a pose is successfully detected. Contains `poses` in `event.detail`. |
+| `SkeletonManager.EVENTS.ERROR` | `'error'` | Dispatched when an error occurs during detection. |
 
 ## Build
 
