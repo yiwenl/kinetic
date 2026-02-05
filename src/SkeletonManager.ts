@@ -9,6 +9,11 @@ export interface SkeletonManagerOptions {
 }
 
 export class SkeletonManager extends EventTarget {
+  static readonly EVENTS = {
+    SKELETON_DETECTED: 'skeleton-detected',
+    ERROR: 'error'
+  } as const;
+
   private model: poseDetection.PoseDetector | null = null;
   private cameraManager: CameraManager | null = null;
   private rafId: number | null = null;
@@ -84,10 +89,10 @@ export class SkeletonManager extends EventTarget {
             });
             this.poses = poses;
             
-            this.dispatchEvent(new CustomEvent('skeleton-detected', { detail: { poses } }));
+            this.dispatchEvent(new CustomEvent(SkeletonManager.EVENTS.SKELETON_DETECTED, { detail: { poses } }));
         } catch (err) {
             console.error('Skeleton detection error:', err);
-            this.dispatchEvent(new CustomEvent('error', { detail: { error: err } }));
+            this.dispatchEvent(new CustomEvent(SkeletonManager.EVENTS.ERROR, { detail: { error: err } }));
         }
     }
 

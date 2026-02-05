@@ -38,7 +38,7 @@ const ctx = canvas.getContext('2d');
         window.addEventListener('resize', resize);
         resize();
         
-        manager.addEventListener('skeleton-detected', (e) => {
+        manager.addEventListener(SkeletonManager.EVENTS.SKELETON_DETECTED, (e) => {
             const poses = e.detail.poses;
             poseCountEl.textContent = poses.length;
             
