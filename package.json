@@ -16,7 +16,7 @@
     "dist"
   ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run build && node --test test/*.test.js",
     "build": "rollup -c",
     "prepare": "npm run build",
     "dev": "vite",

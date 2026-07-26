@@ -18,6 +18,9 @@ export class SkeletonManager extends EventTarget {
   private cameraManager: CameraManager | null = null;
   private rafId: number | null = null;
   private isRunning: boolean = false;
+  private isInitializing: boolean = false;
+  private ownsCamera: boolean = false;
+  private runToken: number = 0;
   private options: SkeletonManagerOptions;
   
   // Store latest results
@@ -31,37 +34,81 @@ export class SkeletonManager extends EventTarget {
     };
   }
 
-  async init(cameraManager?: CameraManager) {
-    if (cameraManager) {
-      this.cameraManager = cameraManager;
-    } else {
-      this.cameraManager = new CameraManager();
-      await this.cameraManager.start();
+  protected createCameraManager(): CameraManager {
+    return new CameraManager();
+  }
+
+  protected readyTensorFlow(): Promise<void> {
+    return tf.ready();
+  }
+
+  protected createPoseDetector(
+    config: poseDetection.BlazePoseMediaPipeModelConfig
+  ): Promise<poseDetection.PoseDetector> {
+    return poseDetection.createDetector(
+      poseDetection.SupportedModels.BlazePose,
+      config
+    );
+  }
+
+  async init(cameraManager?: CameraManager): Promise<void> {
+    if (this.isInitializing) {
+      throw new Error('SkeletonManager initialization is already in progress.');
     }
 
-    const model = poseDetection.SupportedModels.BlazePose;
-    const detectorConfig: poseDetection.BlazePoseMediaPipeModelConfig = {
-      runtime: 'mediapipe',
-      solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/pose',
-      modelType: this.options.modelType
-    };
-    
-    await tf.ready();
+    if (this.cameraManager || this.model) {
+      throw new Error(
+        'SkeletonManager is already initialized. Call dispose() before initializing again.'
+      );
+    }
 
-    this.model = await poseDetection.createDetector(model, detectorConfig);
+    this.isInitializing = true;
+    const ownsCamera = cameraManager === undefined;
+    const nextCameraManager = cameraManager ?? this.createCameraManager();
+    let nextModel: poseDetection.PoseDetector | null = null;
 
-    this.start();
+    try {
+      if (ownsCamera) {
+        await nextCameraManager.start();
+      }
+
+      const detectorConfig: poseDetection.BlazePoseMediaPipeModelConfig = {
+        runtime: 'mediapipe',
+        solutionPath:
+          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404',
+        modelType: this.options.modelType
+      };
+
+      await this.readyTensorFlow();
+
+      nextModel = await this.createPoseDetector(detectorConfig);
+      this.cameraManager = nextCameraManager;
+      this.model = nextModel;
+      this.ownsCamera = ownsCamera;
+
+      this.start();
+    } catch (error) {
+      nextModel?.dispose();
+      if (ownsCamera) {
+        nextCameraManager.dispose();
+      }
+      throw error;
+    } finally {
+      this.isInitializing = false;
+    }
   }
 
   start() {
-    if (this.isRunning) return;
+    if (this.isRunning || !this.cameraManager || !this.model) return;
     this.isRunning = true;
-    this.loop();
+    const runToken = ++this.runToken;
+    void this.loop(runToken);
   }
 
   stop() {
     this.isRunning = false;
-    if (this.rafId) {
+    this.runToken += 1;
+    if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
@@ -73,30 +120,64 @@ export class SkeletonManager extends EventTarget {
       this.model.dispose();
       this.model = null;
     }
+    if (this.cameraManager && this.ownsCamera) {
+      this.cameraManager.dispose();
+    }
     this.cameraManager = null;
+    this.ownsCamera = false;
     this.poses = [];
   }
 
-  private async loop() {
-    if (!this.isRunning || !this.cameraManager || !this.model) return;
+  private isActiveRun(runToken: number): boolean {
+    return (
+      this.isRunning &&
+      this.runToken === runToken &&
+      this.cameraManager !== null &&
+      this.model !== null
+    );
+  }
 
-    const video = this.cameraManager.video;
+  private async loop(runToken: number): Promise<void> {
+    if (!this.isActiveRun(runToken)) return;
+
+    const cameraManager = this.cameraManager;
+    const model = this.model;
+    if (!cameraManager || !model) return;
+
+    const video = cameraManager.video;
     
     if (video.readyState >= 2) {
-        try {
-            const poses = await this.model.estimatePoses(video, {
-                flipHorizontal: this.options.mirror
-            });
-            this.poses = poses;
-            
-            this.dispatchEvent(new CustomEvent(SkeletonManager.EVENTS.SKELETON_DETECTED, { detail: { poses } }));
-        } catch (err) {
-            console.error('Skeleton detection error:', err);
-            this.dispatchEvent(new CustomEvent(SkeletonManager.EVENTS.ERROR, { detail: { error: err } }));
-        }
+      try {
+        const poses = await model.estimatePoses(video, {
+          flipHorizontal: this.options.mirror
+        });
+        if (!this.isActiveRun(runToken)) return;
+
+        this.poses = poses;
+
+        this.dispatchEvent(
+          new CustomEvent(SkeletonManager.EVENTS.SKELETON_DETECTED, {
+            detail: { poses }
+          })
+        );
+      } catch (err) {
+        if (!this.isActiveRun(runToken)) return;
+
+        console.error('Skeleton detection error:', err);
+        this.dispatchEvent(
+          new CustomEvent(SkeletonManager.EVENTS.ERROR, {
+            detail: { error: err }
+          })
+        );
+      }
     }
 
-    this.rafId = requestAnimationFrame(() => this.loop());
+    if (!this.isActiveRun(runToken)) return;
+
+    this.rafId = requestAnimationFrame(() => {
+      this.rafId = null;
+      void this.loop(runToken);
+    });
   }
 
   /**

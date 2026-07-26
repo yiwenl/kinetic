@@ -1,15 +1,16 @@
 # Kinetic
 
-A lightweight Skeleton Tracking / Pose Detection module using TensorFlow.js and MediaPipe (BlazePose), capable of detecting full body poses and providing 3D vertex positions.
+A lightweight, browser-only full-body skeleton tracking library built with
+TensorFlow.js Pose Detection, MediaPipe BlazePose, and `camera-manager`.
 
 ## Features
 
-- **Pose Detection**: Real-time full body pose detection using MediaPipe BlazePose.
-- **3D Landmarks**: specialized in providing the array of 3D vertices for the detected pose.
-- **Mirroring**: Optional horizontal flipping of detection results (enabled by default).
-- **Camera Management**: Built-in camera access handling via `camera-manager`.
-- **Easy Integration**: Modular design with TypeScript support.
-- **Bundled Dependencies**: No need to manage external TensorFlow.js scripts manually.
+- Real-time full-body tracking with 33 BlazePose keypoints.
+- Image-space keypoints for overlays and world-space 3D keypoints in metres.
+- `lite`, `full`, and `heavy` model variants.
+- Optional horizontal result mirroring, enabled by default.
+- Internal camera management or reuse of a caller-provided `CameraManager`.
+- TypeScript declarations and self-contained ESM and UMD bundles.
 
 ## Installation
 
@@ -17,74 +18,164 @@ A lightweight Skeleton Tracking / Pose Detection module using TensorFlow.js and 
 npm install kinetic
 ```
 
-(Note: If this is a private package, adjust installation instructions accordingly)
+## Landmark coordinate spaces
+
+Each detected pose contains the same 33 body landmarks in two coordinate
+spaces:
+
+| Result | Coordinate space | Units | Best used for |
+| :--- | :--- | :--- | :--- |
+| `pose.keypoints` | Input image space | Pixels for `x` and `y` | Drawing a skeleton over the camera feed |
+| `pose.keypoints3D` | World space | Metres for `x`, `y`, and `z` | 3D interaction, motion, and spatial measurements |
+
+The 3D landmarks use an approximately 2 × 2 × 2 metre coordinate space. The
+hip centre is `(0, 0, 0)`, and the Z axis is perpendicular to the XY plane
+through the hip centre.
+
+`getVertices()` returns the first pose's 33 world-space points as
+`[x, y, z][]`. It removes the original keypoint names and confidence scores.
+This result is 3D and is not expressed in screen pixels.
 
 ## Usage
 
 ```typescript
-import { CameraManager, SkeletonManager } from 'kinetic';
+import { SkeletonManager } from 'kinetic';
 
-// 1. Initialize Skeleton Manager (Auto-initializes camera)
-const skeletonManager = new SkeletonManager({
-    modelType: 'full', // 'lite', 'full', or 'heavy'
-    mirror: true       // Mirror results (and flip camera) if desired. Default: true.
+const manager = new SkeletonManager({
+  modelType: 'full', // 'lite', 'full', or 'heavy'
+  mirror: true,
 });
-await skeletonManager.init();
 
-// 2. Append Video (optional, if you want to see the feed)
-if (skeletonManager.video) {
-    document.body.appendChild(skeletonManager.video);
+manager.addEventListener(
+  SkeletonManager.EVENTS.SKELETON_DETECTED,
+  (event) => {
+    const poses = event.detail.poses;
+
+    // 33 world-space 3D points in metres for the first detected pose.
+    const vertices = manager.getVertices();
+
+    console.log(`Detected ${manager.getPoseCount()} pose(s)`);
+    if (vertices.length > 0) {
+      console.log('Nose vertex:', vertices[0]);
+    }
+  },
+);
+
+manager.addEventListener(SkeletonManager.EVENTS.ERROR, (event) => {
+  console.error('Skeleton detection failed:', event.detail.error);
+});
+
+await manager.init();
+
+if (manager.video) {
+  document.body.appendChild(manager.video);
 }
 
-// 3. Listen for Results
-skeletonManager.addEventListener(SkeletonManager.EVENTS.SKELETON_DETECTED, (e) => {
-    // e.detail.poses is Array<poseDetection.Pose>
-    const poses = e.detail.poses;
-    const poseCount = skeletonManager.getPoseCount();
-    
-    // Get 3D vertices for the first pose (format: [[x, y, z], ...])
-    const vertices = skeletonManager.getVertices();
-
-    console.log(`Detected ${poseCount} pose(s)`);
-    if (vertices.length > 0) {
-        console.log('Nose vertex:', vertices[0]); // Typical BlazePose ordering
-    }
-});
-
-// 4. Start (Already initialized above)
+// Later:
+manager.stop();
+manager.dispose();
 ```
+
+`mirror: true` flips the detected keypoints. It does not apply CSS to the
+video element; mirror a visible preview separately when an overlay must align
+with it.
+
+## Camera ownership
+
+Without an argument, `init()` creates and starts an internal camera:
+
+```typescript
+await manager.init();
+```
+
+That camera belongs to Kinetic and is released by `dispose()`.
+
+To share an existing camera, start it before passing it to Kinetic:
+
+```typescript
+import { CameraManager, SkeletonManager } from 'kinetic';
+
+const camera = new CameraManager();
+await camera.start();
+
+const manager = new SkeletonManager();
+await manager.init(camera);
+
+manager.dispose(); // Does not stop or dispose `camera`.
+camera.dispose();  // The caller retains ownership.
+```
+
+If initialization fails after an internal camera starts, Kinetic releases that
+camera automatically. Concurrent initialization and repeated initialization
+without an intervening `dispose()` reject with an error.
+
+## API
+
+### `new SkeletonManager(options?)`
+
+- `modelType?: 'lite' | 'full' | 'heavy'` — defaults to `'full'`.
+- `mirror?: boolean` — defaults to `true` and controls
+  `estimatePoses(..., { flipHorizontal })`.
+
+### `init(cameraManager?)`
+
+Initializes TensorFlow.js and BlazePose, then starts inference. When no camera
+is supplied, Kinetic creates and owns one. A caller-provided camera must
+already be running and remains caller-owned.
+
+Call `dispose()` before initializing the same manager again.
+
+### `start()`
+
+Starts or resumes inference after successful initialization. Calling it before
+initialization is a safe no-op.
+
+### `stop()`
+
+Stops inference without stopping the camera. An inference already in flight is
+ignored when it completes.
+
+### `dispose()`
+
+Stops inference, disposes BlazePose, clears cached results, and disposes an
+internally owned camera. It never stops or disposes a caller-provided camera.
+
+### `getVertices()`
+
+Returns the first pose's 33 world-space 3D keypoints in metres as
+`[x, y, z][]`, or `[]` when no pose is available.
+
+### `getPoseCount()`
+
+Returns the latest pose count. BlazePose currently supports one pose, so this
+is currently `0` or `1`.
+
+### `video`
+
+Returns the active camera's `HTMLVideoElement`, or `null` before initialization
+and after disposal.
 
 ## Events
 
-The `SkeletonManager` exposes event names via the static `EVENTS` property:
-
-| Event Constant | Value | Description |
+| Event constant | Value | Detail |
 | :--- | :--- | :--- |
-| `SkeletonManager.EVENTS.SKELETON_DETECTED` | `'skeleton-detected'` | Dispatched when a pose is successfully detected. Contains `poses` in `event.detail`. |
-| `SkeletonManager.EVENTS.ERROR` | `'error'` | Dispatched when an error occurs during detection. |
+| `SkeletonManager.EVENTS.SKELETON_DETECTED` | `skeleton-detected` | `{ poses }`, including empty results |
+| `SkeletonManager.EVENTS.ERROR` | `error` | `{ error }` for frame-inference failures |
 
-## Build
+Initialization failures reject `init()` directly.
 
-To build the project locally:
-
-```bash
-npm install
-npm run build
-```
-
-## Demo
-
-This project includes a demo to verify functionality and visualize results in 2D.
-
-### Running the Demo
-To run the demo locally:
+## Development
 
 ```bash
-npm install
+npm ci
+npm test
 npm run dev
+npm run build
+npx tsc --noEmit
 ```
 
-Then open the URL provided (usually [http://localhost:5173](http://localhost:5173)).
+The Vite demo is normally available at
+[http://localhost:5173](http://localhost:5173).
 
 ## License
 
