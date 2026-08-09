@@ -4,6 +4,15 @@ import test from 'node:test';
 
 globalThis.require = createRequire(import.meta.url);
 
+if (typeof globalThis.CustomEvent === 'undefined') {
+  globalThis.CustomEvent = class CustomEvent extends Event {
+    constructor(type, options = {}) {
+      super(type);
+      this.detail = options.detail;
+    }
+  };
+}
+
 const { SkeletonManager } = await import('../dist/kinetic.esm.js');
 
 let nextRafId = 1;
@@ -19,40 +28,61 @@ globalThis.cancelAnimationFrame = (id) => {
   animationFrames.delete(id);
 };
 
+function runNextAnimationFrame() {
+  const entry = animationFrames.entries().next().value;
+  assert.ok(entry, 'expected a queued animation frame');
+  const [id, callback] = entry;
+  animationFrames.delete(id);
+  callback(performance.now());
+}
+
 class FakeCamera {
   constructor() {
     this.startCount = 0;
     this.stopCount = 0;
     this.disposeCount = 0;
-    this.video = { readyState: 2 };
+    this.video = {
+      readyState: 2,
+      currentTime: 1,
+      videoWidth: 640,
+      videoHeight: 480,
+    };
   }
 
-  async start() {
-    this.startCount += 1;
-  }
-
-  stop() {
-    this.stopCount += 1;
-  }
-
-  dispose() {
-    this.disposeCount += 1;
-  }
+  async start() { this.startCount += 1; }
+  stop() { this.stopCount += 1; }
+  dispose() { this.disposeCount += 1; }
 }
 
-function createDetector({ estimatePoses } = {}) {
+function createNativeResult() {
   return {
-    disposeCount: 0,
-    estimateCount: 0,
-    dispose() {
-      this.disposeCount += 1;
-    },
-    async estimatePoses(...args) {
-      this.estimateCount += 1;
-      if (estimatePoses) {
-        return estimatePoses(...args);
-      }
-      return [];
+    landmarks: [Array.from({ length: 33 }, (_, index) => ({
+      x: index === 0 ? 0.25 : index / 100,
+      y: index === 0 ? 0.5 : index / 100,
+      z: index === 0 ? -0.125 : index / 1000,
+      visibility: 0.8,
+      presence: 0.9,
+    }))],
+    worldLandmarks: [Array.from({ length: 33 }, (_, index) => ({
+      x: index === 0 ? 0.1 : index / 100,
+      y: index === 0 ? -0.2 : index / 100,
+      z: index === 0 ? 0.3 : index / 100,
+      visibility: 0.7,
+      presence: 0.9,
+    }))],
+    segmentationMasks: [],
+    close() {},
+  };
+}
+
+function createLandmarker({ detectForVideo } = {}) {
+  return {
+    closeCount: 0,
+    detectCount: 0,
+    close() { this.closeCount += 1; },
+    detectForVideo(...args) {
+      this.detectCount += 1;
+      return detectForVideo ? detectForVideo(...args) : createNativeResult();
     },
   };
 }
@@ -60,31 +90,30 @@ function createDetector({ estimatePoses } = {}) {
 class TestSkeletonManager extends SkeletonManager {
   constructor({
     camera = new FakeCamera(),
-    detector = createDetector(),
-    detectorFactory,
-    readyTensorFlow,
+    landmarker = createLandmarker(),
+    landmarkerFactory,
+    options = { mirror: false },
   } = {}) {
-    super({ mirror: false });
+    super(options);
     this.fakeCamera = camera;
-    this.fakeDetector = detector;
-    this.detectorFactory =
-      detectorFactory ?? (async () => this.fakeDetector);
-    this.tensorFlowReady = readyTensorFlow ?? (async () => {});
-    this.detectorConfig = null;
+    this.fakeLandmarker = landmarker;
+    this.landmarkerFactory = landmarkerFactory ?? (async () => landmarker);
+    this.wasmUrl = null;
+    this.landmarkerOptions = null;
   }
 
-  createCameraManager() {
-    return this.fakeCamera;
+  createCameraManager() { return this.fakeCamera; }
+
+  async resolveVisionFileset(wasmUrl) {
+    this.wasmUrl = wasmUrl;
+    return { wasmLoaderPath: 'loader.js', wasmBinaryPath: 'binary.wasm' };
   }
 
-  async readyTensorFlow() {
-    await this.tensorFlowReady();
+  async createPoseLandmarker(fileset, options) {
+    this.landmarkerOptions = options;
+    return this.landmarkerFactory(fileset, options);
   }
 
-  async createPoseDetector(config) {
-    this.detectorConfig = config;
-    return this.detectorFactory(config);
-  }
 }
 
 function deferred() {
@@ -97,53 +126,121 @@ function deferred() {
   return { promise, reject, resolve };
 }
 
-async function flushMicrotasks() {
-  await Promise.resolve();
-  await Promise.resolve();
-}
-
-function createPose(firstX) {
-  const keypoints = Array.from({ length: 33 }, (_, index) => ({
-    x: firstX + index,
-    y: 100 + index,
-    z: index / 100,
-    score: 0.99,
-    name: `point_${index}`,
-  }));
-
-  return {
-    score: 0.99,
-    keypoints,
-    keypoints3D: keypoints,
-  };
-}
-
 test.beforeEach(() => {
   animationFrames.clear();
   nextRafId = 1;
 });
 
-test('initialization uses replaceable runtime boundaries', async () => {
-  const camera = new FakeCamera();
-  const manager = new TestSkeletonManager({ camera });
+test('CommonJS bundle exposes the public API', () => {
+  const commonJs = globalThis.require('../dist/kinetic.cjs');
+  assert.equal(typeof commonJs.SkeletonManager, 'function');
+  assert.equal(typeof commonJs.toCompatibilityPoses, 'function');
+});
+
+test('initialization uses pinned Tasks Vision WASM and the selected versioned pose model', async () => {
+  const expectedModels = {
+    lite: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+    full: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
+    heavy: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task',
+  };
+
+  for (const [modelType, modelAssetPath] of Object.entries(expectedModels)) {
+    const manager = new TestSkeletonManager({ options: { modelType, mirror: false } });
+    await manager.init();
+
+    assert.equal(manager.wasmUrl, 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm');
+    assert.deepEqual(manager.landmarkerOptions, {
+      baseOptions: { modelAssetPath },
+      runningMode: 'VIDEO',
+      numPoses: 1,
+    });
+    manager.dispose();
+  }
+});
+
+test('skeleton event exposes mirrored compatibility data and untouched native result', async () => {
+  const result = createNativeResult();
+  const manager = new TestSkeletonManager({
+    landmarker: createLandmarker({ detectForVideo: () => result }),
+    options: { mirror: true },
+  });
+  let detail;
+  manager.addEventListener(SkeletonManager.EVENTS.SKELETON_DETECTED, (event) => { detail = event.detail; });
 
   await manager.init();
 
-  assert.equal(camera.startCount, 1);
-  assert.equal(manager.video, camera.video);
-  assert.equal(manager.getPoseCount(), 0);
-
+  assert.equal(detail.result, result);
+  assert.deepEqual(detail.poses[0].keypoints[0], {
+    x: 480, y: 240, z: -0.125, score: 0.8, name: 'nose',
+  });
+  assert.deepEqual(detail.poses[0].keypoints3D[0], {
+    x: -0.1, y: -0.2, z: 0.3, score: 0.7, name: 'nose',
+  });
+  assert.deepEqual(manager.getVertices()[0], [-0.1, -0.2, 0.3]);
+  assert.equal(result.landmarks[0][0].x, 0.25);
+  assert.equal(result.worldLandmarks[0][0].x, 0.1);
   manager.dispose();
 });
 
-test('dispose releases a camera created by the manager', async () => {
+test('runs detection only once for each new video frame', async () => {
+  const landmarker = createLandmarker();
+  const manager = new TestSkeletonManager({ landmarker });
+
+  await manager.init();
+  assert.equal(landmarker.detectCount, 1);
+
+  runNextAnimationFrame();
+  assert.equal(landmarker.detectCount, 1);
+
+  manager.video.currentTime = 2;
+  runNextAnimationFrame();
+  assert.equal(landmarker.detectCount, 2);
+  manager.dispose();
+});
+
+test('continues after an inference error and emits the error detail', async () => {
+  let attempt = 0;
+  const failure = new Error('temporary failure');
+  const manager = new TestSkeletonManager({
+    landmarker: createLandmarker({
+      detectForVideo: () => {
+        attempt += 1;
+        if (attempt === 1) throw failure;
+        return createNativeResult();
+      },
+    }),
+  });
+  let receivedError;
+  let resultCount = 0;
+  manager.addEventListener(SkeletonManager.EVENTS.ERROR, (event) => { receivedError = event.detail.error; });
+  manager.addEventListener(SkeletonManager.EVENTS.SKELETON_DETECTED, () => { resultCount += 1; });
+
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await manager.init();
+    manager.video.currentTime = 2;
+    runNextAnimationFrame();
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(receivedError, failure);
+  assert.equal(resultCount, 1);
+  manager.dispose();
+});
+
+test('dispose releases an internally created camera and closes the landmarker', async () => {
   const camera = new FakeCamera();
-  const manager = new TestSkeletonManager({ camera });
+  const landmarker = createLandmarker();
+  const manager = new TestSkeletonManager({ camera, landmarker });
 
   await manager.init();
   manager.dispose();
 
+  assert.equal(camera.startCount, 1);
   assert.equal(camera.disposeCount, 1);
+  assert.equal(landmarker.closeCount, 1);
   assert.equal(manager.video, null);
 });
 
@@ -154,80 +251,164 @@ test('dispose preserves a caller-provided camera', async () => {
   await manager.init(camera);
   manager.dispose();
 
+  assert.equal(camera.startCount, 0);
   assert.equal(camera.stopCount, 0);
   assert.equal(camera.disposeCount, 0);
-  assert.equal(manager.video, null);
 });
 
 test('failed initialization releases its internally created camera', async () => {
   const camera = new FakeCamera();
-  const initializationError = new Error('detector failed');
+  const failure = new Error('landmarker failed');
   const manager = new TestSkeletonManager({
     camera,
-    detectorFactory: async () => {
-      throw initializationError;
-    },
+    landmarkerFactory: async () => { throw failure; },
   });
 
-  await assert.rejects(manager.init(), initializationError);
-
+  await assert.rejects(manager.init(), failure);
   assert.equal(camera.disposeCount, 1);
   assert.equal(manager.video, null);
 });
 
-test('repeated initialization is rejected until dispose', async () => {
-  const manager = new TestSkeletonManager();
+test('dispose cancels pending initialization and releases local resources', async () => {
+  const camera = new FakeCamera();
+  const landmarker = createLandmarker();
+  const pending = deferred();
+  const factoryStarted = deferred();
+  const manager = new TestSkeletonManager({
+    camera,
+    landmarker,
+    landmarkerFactory: () => {
+      factoryStarted.resolve();
+      return pending.promise;
+    },
+  });
 
-  await manager.init();
-
-  await assert.rejects(
-    manager.init(),
-    /already initialized/i,
-  );
-
+  const initialization = manager.init();
+  await factoryStarted.promise;
   manager.dispose();
-  await manager.init();
-  manager.dispose();
+  assert.equal(camera.disposeCount, 1);
+  pending.resolve(landmarker);
+
+  await assert.rejects(initialization, /cancelled.*dispose/i);
+  assert.equal(camera.disposeCount, 1);
+  assert.equal(landmarker.closeCount, 1);
+  assert.equal(landmarker.detectCount, 0);
+  assert.equal(manager.video, null);
 });
 
-test('concurrent initialization is rejected', async () => {
-  const detector = createDetector();
-  const firstDetector = deferred();
-  let detectorCreationCount = 0;
+test('init rejects when a synchronous result listener disposes the manager', async () => {
+  const camera = new FakeCamera();
+  const landmarker = createLandmarker();
+  const manager = new TestSkeletonManager({ camera, landmarker });
+  manager.addEventListener(SkeletonManager.EVENTS.SKELETON_DETECTED, () => {
+    manager.dispose();
+  });
+
+  await assert.rejects(manager.init(), /cancelled.*dispose/i);
+
+  assert.equal(camera.disposeCount, 1);
+  assert.equal(landmarker.closeCount, 1);
+  assert.equal(manager.video, null);
+});
+
+test('a camera start that resolves after dispose is released again', async () => {
+  const camera = new FakeCamera();
+  const startPending = deferred();
+  const startEntered = deferred();
+  camera.active = false;
+  camera.start = async () => {
+    camera.startCount += 1;
+    startEntered.resolve();
+    await startPending.promise;
+    camera.active = true;
+  };
+  camera.dispose = () => {
+    camera.disposeCount += 1;
+    camera.active = false;
+  };
+  const manager = new TestSkeletonManager({ camera });
+
+  const initialization = manager.init();
+  await startEntered.promise;
+  manager.dispose();
+  assert.equal(camera.active, false);
+  startPending.resolve();
+
+  await assert.rejects(initialization, /cancelled.*dispose/i);
+  assert.equal(camera.active, false);
+  assert.equal(camera.disposeCount, 2);
+  assert.equal(manager.video, null);
+});
+
+test('can initialize again while a disposed initialization is still pending', async () => {
+  const firstCamera = new FakeCamera();
+  const secondCamera = new FakeCamera();
+  const firstLandmarker = createLandmarker();
+  const secondLandmarker = createLandmarker();
+  const firstPending = deferred();
+  const firstFactoryStarted = deferred();
   const manager = new TestSkeletonManager({
-    detector,
-    detectorFactory: async () => {
-      detectorCreationCount += 1;
-      if (detectorCreationCount === 1) {
-        return firstDetector.promise;
-      }
-      return detector;
+    camera: firstCamera,
+    landmarkerFactory: () => {
+      firstFactoryStarted.resolve();
+      return firstPending.promise;
     },
   });
 
   const firstInitialization = manager.init();
-  await flushMicrotasks();
+  await firstFactoryStarted.promise;
+  manager.dispose();
 
-  await assert.rejects(
-    manager.init(),
-    /initialization.*progress/i,
-  );
+  manager.landmarkerFactory = async () => secondLandmarker;
+  await manager.init(secondCamera);
+  assert.equal(manager.video, secondCamera.video);
 
-  firstDetector.resolve(detector);
-  await firstInitialization;
+  firstPending.resolve(firstLandmarker);
+  await assert.rejects(firstInitialization, /cancelled.*dispose/i);
+  assert.equal(firstLandmarker.closeCount, 1);
+  assert.equal(manager.video, secondCamera.video);
+
+  manager.dispose();
+  assert.equal(secondLandmarker.closeCount, 1);
+  assert.equal(secondCamera.disposeCount, 0);
+});
+
+test('rejects repeated initialization until dispose', async () => {
+  const manager = new TestSkeletonManager();
+
+  await manager.init();
+  await assert.rejects(manager.init(), /already initialized/i);
+
+  manager.dispose();
+  await manager.init();
   manager.dispose();
 });
 
-test('start before init does not prevent initialization from starting', async () => {
-  const detector = createDetector();
-  const manager = new TestSkeletonManager({ detector });
+test('rejects concurrent initialization', async () => {
+  const pending = deferred();
+  const landmarker = createLandmarker();
+  const manager = new TestSkeletonManager({
+    landmarker,
+    landmarkerFactory: () => pending.promise,
+  });
+
+  const firstInit = manager.init();
+  await Promise.resolve();
+  await assert.rejects(manager.init(), /initialization.*progress/i);
+
+  pending.resolve(landmarker);
+  await firstInit;
+  manager.dispose();
+});
+
+test('start before init remains a safe no-op', async () => {
+  const landmarker = createLandmarker();
+  const manager = new TestSkeletonManager({ landmarker });
 
   manager.start();
   await manager.init();
-  await flushMicrotasks();
 
-  assert.equal(detector.estimateCount, 1);
-
+  assert.equal(landmarker.detectCount, 1);
   manager.dispose();
 });
 
@@ -238,84 +419,28 @@ test('stop cancels requestAnimationFrame identifier zero', async () => {
   nextRafId = 0;
 
   await manager.init();
-
   assert.equal(animationFrames.has(0), true);
 
   manager.stop();
-
   assert.equal(animationFrames.has(0), false);
   manager.dispose();
 });
 
-test('stop ignores an inference result that is still in flight', async () => {
-  const inference = deferred();
-  const detector = createDetector({
-    estimatePoses: () => inference.promise,
-  });
-  const manager = new TestSkeletonManager({ detector });
-  let eventCount = 0;
-  manager.addEventListener(
-    SkeletonManager.EVENTS.SKELETON_DETECTED,
-    () => {
-      eventCount += 1;
+test('a stopped run cannot publish a result returned after stop', async () => {
+  let manager;
+  const landmarker = createLandmarker({
+    detectForVideo: () => {
+      manager.stop();
+      return createNativeResult();
     },
-  );
+  });
+  manager = new TestSkeletonManager({ landmarker });
+  let eventCount = 0;
+  manager.addEventListener(SkeletonManager.EVENTS.SKELETON_DETECTED, () => { eventCount += 1; });
 
   await manager.init();
-  manager.stop();
-  inference.resolve([createPose(10)]);
-  await flushMicrotasks();
 
-  assert.equal(manager.getPoseCount(), 0);
   assert.equal(eventCount, 0);
-
-  manager.dispose();
-});
-
-test('a previous run cannot overwrite results from a later run', async () => {
-  const firstInference = deferred();
-  const secondInference = deferred();
-  const inferenceQueue = [firstInference, secondInference];
-  const detector = createDetector({
-    estimatePoses: () => inferenceQueue.shift().promise,
-  });
-  const manager = new TestSkeletonManager({ detector });
-  let eventCount = 0;
-  manager.addEventListener(
-    SkeletonManager.EVENTS.SKELETON_DETECTED,
-    () => {
-      eventCount += 1;
-    },
-  );
-
-  await manager.init();
-  manager.stop();
-  manager.start();
-
-  secondInference.resolve([createPose(20)]);
-  await flushMicrotasks();
-
-  assert.deepEqual(manager.getVertices()[0], [20, 100, 0]);
-  assert.equal(eventCount, 1);
-
-  firstInference.resolve([createPose(10)]);
-  await flushMicrotasks();
-
-  assert.deepEqual(manager.getVertices()[0], [20, 100, 0]);
-  assert.equal(eventCount, 1);
-
-  manager.dispose();
-});
-
-test('initialization pins MediaPipe Pose assets to the installed version', async () => {
-  const manager = new TestSkeletonManager();
-
-  await manager.init();
-
-  assert.equal(
-    manager.detectorConfig.solutionPath,
-    'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404',
-  );
-
+  assert.equal(manager.getPoseCount(), 0);
   manager.dispose();
 });

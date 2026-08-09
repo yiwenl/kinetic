@@ -15,6 +15,12 @@ export default {
       format: 'umd',
       name: 'kinetic',
       sourcemap: true
+    },
+    {
+      file: 'dist/kinetic.cjs',
+      format: 'cjs',
+      sourcemap: true,
+      exports: 'named'
     }
   ],
   external: [], 

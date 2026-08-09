@@ -2,233 +2,147 @@
 
 ## Project purpose
 
-Kinetic is a small, browser-only TypeScript library for real-time full-body
-skeleton tracking. It combines TensorFlow.js Pose Detection, the MediaPipe
-BlazePose runtime, and `camera-manager`.
+Kinetic is a browser-only TypeScript library for real-time 33-point full-body
+skeleton tracking. It combines MediaPipe Tasks Vision `PoseLandmarker` with
+`camera-manager`, preserving a Pose Detection-like compatibility result while
+also exposing the untouched native result.
 
-Keep the core library framework-agnostic and focused on pose detection. Avoid
-adding UI, rendering, gesture recognition, or application-specific skeleton
-logic to `SkeletonManager`.
+Keep UI, rendering, gestures, application-specific movement logic, and worker
+orchestration outside `SkeletonManager`.
 
 ## Important files
 
-- `src/SkeletonManager.ts` — detector, camera, loop, events, and getters.
-- `src/index.ts` — package exports.
-- `README.md` — consumer-facing usage documentation.
-- `test/index.html` and `test/demo.js` — browser camera and 2D overlay demo.
-- `rollup.config.js` — ESM and UMD builds.
-- `vite.config.js` — local demo server and source alias.
-- `tsconfig.json` — strict TypeScript and declaration settings.
-- `.github/workflows/build.yml` — Node.js 20 build check.
+- `src/SkeletonManager.ts` — Tasks runtime, camera ownership, frame loop,
+  events, cache, and public methods.
+- `src/poseCompatibility.ts` — pure native-to-compatibility conversion and the
+  fixed 33-name ordering.
+- `src/index.ts` — public exports.
+- `test/SkeletonManager.test.js` — runtime configuration, event, frame, and
+  lifecycle tests against the built ESM artifact.
+- `test/poseCompatibility.test.js` — coordinate, unit, name, score, mirror,
+  and malformed-result tests.
+- `test/index.html` and `test/demo.js` — browser camera/2D overlay demo.
+- `rollup.config.js` — self-contained ESM, CommonJS, and UMD outputs.
 
-Files under `dist/` are generated and ignored. Do not edit them directly.
+`dist/` is generated. Never edit it directly.
 
-## Landmark coordinate contract
+## Runtime and model contract
 
-BlazePose returns 33 named body keypoints for its single detected pose in two
-coordinate spaces:
+- Runtime dependency: `@mediapipe/tasks-vision` exactly `1.0.1`.
+- WASM base URL:
+  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm`.
+- `modelType` maps to official float16 version `1` model bundles:
+  - `lite` → `pose_landmarker_lite/float16/1/pose_landmarker_lite.task`
+  - `full` → `pose_landmarker_full/float16/1/pose_landmarker_full.task`
+  - `heavy` → `pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task`
+- Running mode is `VIDEO`; `numPoses` is `1`.
+- Tasks Vision and camera-manager are bundled.
+- Synchronous `detectForVideo(video, performance.now())` runs once per new
+  `video.currentTime` on the main thread.
 
-### Image keypoints
+Keep runtime/WASM versions aligned. Any asset change must update source,
+tests, README, and this file together.
 
-`pose.keypoints` contains image-space points. Its `x` and `y` values are pixel
-coordinates in the input image, not normalized values. These points are best
-for drawing a skeleton over the camera feed.
+## Landmark and event contracts
 
-```ts
-type ImageKeypoint = {
-  x: number;
-  y: number;
-  z?: number;
-  score?: number;
-  name?: string;
-};
-```
+`skeleton-detected` detail is `{ poses, result }`.
 
-### 3D keypoints
+`poses` is the compatibility result. Each valid pose has exactly 33 ordered,
+named points:
 
-`pose.keypoints3D` contains world-space 3D points. Its `x`, `y`, and `z` values
-are expressed in meters within an approximately 2 × 2 × 2 metre coordinate
-space. The hip centre is the origin `(0, 0, 0)`, and the Z axis is
-perpendicular to the XY plane through that origin.
+- `keypoints`: source-video pixel X/Y, native relative Z, visibility as
+  optional `score`, and the established BlazePose `name`.
+- `keypoints3D`: world-space X/Y/Z in metres, visibility as optional `score`,
+  and the same `name`.
+- `score`: arithmetic mean of available image-landmark visibility values, or
+  `undefined` if none exist.
 
-`getVertices()` returns the first pose's 33 world-space points as
-`[x, y, z][]`. It intentionally drops each keypoint's `score` and `name`.
-Do not describe this result as 2D or as screen pixels.
+When `mirror: true`, compatibility image X is
+`videoWidth - normalizedX * videoWidth`; compatibility world X is negated.
+Y and Z do not change.
 
-The raw `skeleton-detected` event provides the complete Pose Detection result,
-including both `keypoints` and `keypoints3D`.
+`result` is the exact native `PoseLandmarkerResult`. Its `landmarks` remain
+normalized, `worldLandmarks` remain in metres, and neither is mirrored.
 
-## Architecture and lifecycle
+`getVertices()` returns the first compatibility pose's `keypoints3D` as 33
+`[x, y, z]` entries. This API is 3D and measured in metres. Never document it
+as 2D, normalized image coordinates, or pixels.
 
-1. `init(cameraManager?)` uses a caller-provided camera or creates and starts
-   an internal `CameraManager`.
-2. TensorFlow.js waits for the registered WebGL backend to become ready.
-3. A BlazePose detector is created with the MediaPipe runtime and remote
-   assets from jsDelivr.
-4. A sequential `requestAnimationFrame` loop passes the current video to
-   `estimatePoses()`.
-5. The latest pose array is cached and emitted through `skeleton-detected`.
-6. `getVertices()` exposes the first pose's `keypoints3D`.
-7. Each inference run has a token. `stop()` invalidates the token so an
-   in-flight result cannot update state or emit an event afterward.
-8. `dispose()` stops inference, disposes the detector, and disposes the camera
-   only when Kinetic created it.
+## Lifecycle contract
 
-The event is emitted after every successful inference, including results whose
-`poses` array is empty. Consumers must check array lengths.
+1. `init()` rejects concurrent/repeated initialization until `dispose()`.
+2. Without an argument, the manager creates/starts a camera and disposes it on
+   failure or normal disposal.
+3. A supplied camera remains entirely caller-owned.
+4. Runtime resources enter instance state only after initialization succeeds.
+5. `start()` before initialization is a safe no-op.
+6. Run tokens prevent stopped or stale callbacks from publishing results.
+7. `stop()` cancels RAF identifier zero as well as positive identifiers.
+8. Inference errors emit `{ error }` and later frames remain processable.
+9. `dispose()` calls `PoseLandmarker.close()`, clears cached poses, and releases
+   only an internally owned camera.
+10. `dispose()` invalidates pending initialization. Once the awaited operation
+    returns, `init()` rejects and releases local resources instead of publishing
+    them.
 
-BlazePose currently supports one pose, so `getPoseCount()` is effectively `0`
-or `1`, even though the API returns a general count.
-
-## Mirroring
-
-`mirror` defaults to `true` and is passed to Pose Detection as
-`flipHorizontal`. Therefore both `pose.keypoints` and `pose.keypoints3D` in
-the emitted result are already horizontally flipped when mirroring is enabled.
-
-`SkeletonManager` does not apply CSS to the video element. The demo mirrors
-the visible video separately with `transform: scaleX(-1)` so it aligns with
-the flipped image keypoints. Keep detector mirroring, video presentation, and
-overlay mapping consistent.
+The native call is synchronous, but retain the post-inference run-token check:
+a test landmarker or callback can synchronously stop the manager during the
+call.
 
 ## Public API
 
 ```ts
-import { SkeletonManager } from 'kinetic';
-
 const manager = new SkeletonManager({
   modelType: 'full',
   mirror: true,
 });
 
-manager.addEventListener(
-  SkeletonManager.EVENTS.SKELETON_DETECTED,
-  (event) => {
-    const poses = (event as CustomEvent).detail.poses;
-    const worldVerticesInMeters = manager.getVertices();
-  },
-);
-
-manager.addEventListener(SkeletonManager.EVENTS.ERROR, (event) => {
-  const error = (event as CustomEvent).detail.error;
-});
-
-await manager.init();
-
-// Later:
+await manager.init(optionalCameraManager);
+manager.start();
 manager.stop();
 manager.dispose();
+manager.getVertices();
+manager.getPoseCount();
+manager.video;
 ```
 
-Options:
+Defaults are `modelType: 'full'` and `mirror: true`. Preserve the event names
+`skeleton-detected` and `error`, the 33-point ordering, 3D metre units, and the
+dual `{ poses, result }` event unless making an explicit breaking release.
 
-- `modelType` accepts `'lite'`, `'full'`, or `'heavy'` and defaults to
-  `'full'`. Accuracy and resource use increase in that order.
-- `mirror` defaults to `true`.
-
-Methods and properties:
-
-- `init(cameraManager?)` initializes the camera and remote detector, then
-  starts inference. Concurrent or repeated calls reject until `dispose()`.
-- `start()` starts inference after successful initialization. Before
-  initialization it is a safe no-op.
-- `stop()` stops inference without stopping the camera.
-- `dispose()` stops inference, disposes BlazePose, and disposes an internally
-  owned camera. It leaves a caller-provided camera running.
-- `getVertices()` returns the first pose's 33 world-space 3D points in metres.
-- `getPoseCount()` returns the number of poses in the latest result.
-- `video` returns the current camera's detached `HTMLVideoElement`, or `null`.
-
-Events:
-
-- `SkeletonManager.EVENTS.SKELETON_DETECTED` (`skeleton-detected`) provides
-  `{ poses }`.
-- `SkeletonManager.EVENTS.ERROR` (`error`) provides `{ error }` for inference
-  failures.
-
-Initialization errors reject `init()` directly; they are not emitted through
-the `error` event.
-
-## Runtime constraints
-
-- The package requires a browser DOM, camera APIs, WebGL, and a secure context
-  such as HTTPS or localhost.
-- Camera permission may require a user gesture.
-- MediaPipe Pose assets are downloaded from jsDelivr at the pinned version
-  `0.5.1675469404`, so first initialization requires network access.
-- The package bundles TensorFlow.js, Pose Detection, MediaPipe, and
-  `camera-manager`; current unminified ESM and UMD outputs are about 3 MB each.
-- Use the ESM named imports in browser tooling. The current CommonJS `require`
-  export points to a `.js` UMD file inside a `"type": "module"` package and is
-  not a reliable Node.js CommonJS entry point.
-
-## Remaining health-check findings
-
-The core lifecycle issues are covered by automated regression tests. These
-lower-priority improvements remain:
-
-- Calling `dispose()` while `init()` itself is still awaiting TensorFlow or
-  detector creation does not cancel that initialization.
-- Export explicit event-detail types so consumers do not need casts around
-  `CustomEvent`.
-- The bundle is intentionally self-contained but large. If package size
-  becomes important, make major ML dependencies peer/external dependencies
-  as an explicit packaging decision.
-
-Preserve event names, landmark ordering, coordinate units, and mirroring
-semantics unless making an explicit breaking release.
+Typed consumers can use `SkeletonDetectedEventDetail`,
+`SkeletonErrorEventDetail`, and `SkeletonManagerEventMap`. The package exports
+ESM, `dist/kinetic.cjs` for `require()`, and a browser UMD artifact.
 
 ## Development workflow
 
-CI currently targets Node.js 20.
-
-Install dependencies and run the browser demo:
-
 ```bash
 npm ci
+npm test
+npm run build
+npx tsc --noEmit
 npm run dev
 ```
 
-Build the ESM, UMD, source maps, and declarations:
+`npm test` builds before importing `dist/kinetic.esm.js`. Before finishing a
+behavior change, verify:
 
-```bash
-npm run build
-```
-
-Type-check without generating files:
-
-```bash
-npx tsc --noEmit
-```
-
-Run the automated lifecycle regression tests:
-
-```bash
-npm test
-```
-
-For browser behavior changes, also manually verify:
-
-1. Camera permission succeeds and the video appears.
-2. A visible body produces 33 image keypoints and 33 world-space 3D keypoints.
-3. `getVertices()` returns 33 finite `[x, y, z]` values in metres.
-4. The mirrored video and 2D overlay remain aligned.
-5. Empty results update the pose count to zero.
-6. Detection errors emit the documented error event.
-7. Stop prevents further inference without stopping a caller-owned camera.
-8. Dispose releases the detector and any internally owned camera.
-9. A caller-provided `CameraManager` remains under caller ownership.
+1. all 33 image and world points and names;
+2. compatibility pixel coordinates versus native normalized coordinates;
+3. `keypoints3D` and `getVertices()` remain finite 3D metre values;
+4. mirrored overlay alignment and unmodified native data;
+5. empty detection and recovery from transient errors;
+6. stop/dispose and caller-owned camera behavior;
+7. all three model variants initialize;
+8. no browser console errors.
 
 ## Change guidelines
 
-- Never discard the Z coordinate or describe `getVertices()` as 2D.
-- Keep image-space overlay transforms separate from world-space 3D data.
-- Avoid overlapping inference calls; the current loop waits for
-  `estimatePoses()` before scheduling the next frame.
-- Preserve camera ownership: do not stop or dispose a caller-provided camera.
-- Keep public types explicit and avoid `any` in new API surface.
-- Update `README.md` and this file when public behavior changes.
-- Run `npm run build` and `npx tsc --noEmit` before considering a change
-  complete.
-- Do not commit `dist/`, `node_modules/`, local environment files, or captured
-  camera media.
+- Put coordinate conversion and naming in `poseCompatibility.ts`.
+- Never discard Z or describe `keypoints3D`/`getVertices()` as 2D.
+- Preserve native `result` identity and do not mirror it.
+- Never process the same `video.currentTime` twice.
+- Preserve camera ownership and run-token checks.
+- Add a failing behavior test before production changes.
+- Update README and this file for public/API/asset changes.
+- Do not commit `dist/`, `node_modules/`, environment files, or camera media.
